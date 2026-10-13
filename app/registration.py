@@ -164,6 +164,7 @@ class RegistrationSession:
     language: str = "uz"
     updated_at: datetime = field(default_factory=datetime.utcnow)
     history: List[Dict[str, str]] = field(default_factory=list)
+    is_already_registered: bool = False
 
     def add_message(self, role: str, content: str) -> None:
         """Record turn in history, retaining recent conversation context."""

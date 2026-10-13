@@ -218,9 +218,14 @@ class RegistrationAgent:
             "5. Confirmation: When all 3 fields (first_name, last_name, phone_number) are present and state is AWAITING_CONFIRMATION, if the user confirms ('Ha', 'To\\'g\\'ri', 'Tasdiqlayman'), set is_confirmation: true. Do NOT confirm if they are asking a question or correcting something.\n"
             "6. Cancellation: If user clearly wants to cancel ('Bekor qil', 'To\\'xtat', 'Kerak emas'), set is_cancellation: true.\n"
             "7. Registration Intent: Set is_registration_intent to true if the user's message is related to attending, registering, asking questions about the event (time, place, format, cost), or providing any information. Set false ONLY if it is completely irrelevant personal banter.\n"
+            "8. ALREADY REGISTERED USER:\n"
+            "   - If 'Already registered in Google Sheets: True': This user has ALREADY confirmed their registration previously!\n"
+            "   - If they greet, ask about the event, or ask to register, inform them warmly that they are ALREADY registered (e.g. 'Assalomu alaykum! Siz tadbirimizga allaqachon muvaffaqiyatli ro\\'yxatdan o\\'tgansiz. Biror ma\\'lumotni o\\'zgartirmoqchimisiz?').\n"
+            "   - If they want to change their details ('boshqa raqamim...', 'familiyamni o\\'zgartir'), allow the update and guide them to confirm the updated info.\n"
             "- NEVER invent or hallucinate personal details.\n\n"
             "Current registration status for this user:\n"
             f"Already collected: first_name={session.first_name!r}, last_name={session.last_name!r}, phone_number={session.phone_number!r}.\n"
+            f"Already registered in Google Sheets: {session.is_already_registered}.\n"
             f"Current state: {session.state.value}.\n\n"
             "Output JSON format:\n"
             "{\n"
@@ -315,6 +320,28 @@ class RegistrationAgent:
         # Check intent: phrases or greetings
         has_intent_phrase = any(phrase in lowered for phrase in REGISTRATION_INTENT_PHRASES)
         has_greeting = any(kw in lowered for kw in GREETING_KEYWORDS)
+
+        # If user is already registered in Google Sheets and IDLE, and not updating info
+        if session.is_already_registered and session.state == RegistrationState.IDLE and not (phone or (first_name and last_name)):
+            if has_greeting or has_intent_phrase or len(text.split()) <= 4:
+                name_part = f", {session.first_name}" if session.first_name else ""
+                phone_part = f" (Telefon: {session.formatted_phone()})" if session.phone_number else ""
+                reply = (
+                    f"Assalomu alaykum{name_part}! Siz tadbirimizga allaqachon muvaffaqiyatli ro'yxatdan o'tgansiz{phone_part}. "
+                    "Sizni tadbirimizda kutamiz! Biror ma'lumotni o'zgartirmoqchimisiz yoki savolingiz bormi?"
+                    if lang == "uz"
+                    else (
+                        f"Здравствуйте{name_part}! Вы уже успешно зарегистрированы на мероприятие{phone_part}. "
+                        "Ждем вас на мероприятии! Хотите обновить данные или у вас есть вопрос?"
+                        if lang == "ru"
+                        else f"Hello{name_part}! You are already registered for the event{phone_part}. Let us know if you have any questions!"
+                    )
+                )
+                return AgentResult(
+                    is_registration_intent=True,
+                    detected_language=lang,
+                    custom_reply=reply,
+                )
 
         # If user is in active registration state, intent is already established
         if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):

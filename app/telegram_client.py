@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from typing import Dict, List, Optional, Tuple
 from telethon import TelegramClient, events
@@ -130,6 +131,20 @@ class UserbotService:
 
             # 3. Retrieve conversation session and record user message
             session = self.conversation_manager.get_session(sender_id)
+
+            # Check if user already registered in Google Sheets by telegram_user_id
+            existing_reg = self.google_sheets.get_registration(sender_id)
+            if existing_reg:
+                session.is_already_registered = True
+                if not session.first_name and existing_reg.get("first_name"):
+                    session.first_name = existing_reg["first_name"]
+                if not session.last_name and existing_reg.get("last_name"):
+                    session.last_name = existing_reg["last_name"]
+                if not session.phone_number and existing_reg.get("phone_number"):
+                    session.phone_number = existing_reg["phone_number"]
+            else:
+                session.is_already_registered = False
+
             session.add_message("user", text)
 
             # 4. Pass to Registration Agent for natural-language analysis
@@ -304,8 +319,16 @@ class UserbotService:
             logger.error(f"Unexpected error handling message from user: {e}", exc_info=True)
 
     async def _safe_respond(self, event: events.NewMessage.Event, text: str) -> None:
-        """Send response message with FloodWait protection."""
+        """Send response message with realistic 4-5s human typing simulation and FloodWait protection."""
         try:
+            # 4-5 seconds realistic typing simulation delay
+            delay = round(random.uniform(4.0, 5.0), 1)
+            try:
+                async with event.client.action(event.chat_id, "typing"):
+                    await asyncio.sleep(delay)
+            except Exception:
+                await asyncio.sleep(delay)
+
             await event.respond(text)
         except FloodWaitError as e:
             logger.warning(f"Telegram FloodWaitError on respond: waiting {e.seconds}s.")

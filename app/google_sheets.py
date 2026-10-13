@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
@@ -44,6 +46,8 @@ class GoogleSheetsService:
         self.timezone_name = timezone_name
         self._client: gspread.Client | None = None
         self._worksheet: gspread.Worksheet | None = None
+        self._cache_records: Dict[int, Dict[str, Any]] = {}
+        self._cache_time: float = 0.0
 
     def initialize(self) -> None:
         """Authenticate and verify access to the spreadsheet and worksheet."""
@@ -85,33 +89,54 @@ class GoogleSheetsService:
             logger.info(
                 f"Successfully connected to Google Sheet '{spreadsheet.title}' (tab: '{self.tab_name}')."
             )
+            self._refresh_cache(force=True)
 
         except Exception as e:
             logger.error(f"Failed to initialize Google Sheets service: {e}")
             raise
 
-    def find_user_row(self, telegram_user_id: int) -> int | None:
-        """
-        Find 1-based row index for telegram_user_id, or None if not found.
-        """
-        if not self._worksheet:
-            self.initialize()
+    def _refresh_cache(self, force: bool = False) -> None:
+        """Fetch all rows from Google Sheets and cache them for fast lookup."""
+        if not force and self._cache_records and (time.time() - self._cache_time < 30.0):
+            return
 
-        assert self._worksheet is not None
+        if not self._worksheet:
+            return
+
         try:
-            user_id_str = str(telegram_user_id)
-            user_id_col = self._worksheet.col_values(2)
-            for idx, existing_id in enumerate(user_id_col[1:], start=2):
-                if str(existing_id).strip() == user_id_str:
-                    return idx
-            return None
+            all_rows = self._worksheet.get_all_values()
+            new_cache: Dict[int, Dict[str, Any]] = {}
+            for idx, row in enumerate(all_rows[1:], start=2):
+                if len(row) > 1 and row[1].strip().isdigit():
+                    uid = int(row[1].strip())
+                    new_cache[uid] = {
+                        "row_index": idx,
+                        "registered_at": row[0] if len(row) > 0 else "",
+                        "telegram_user_id": uid,
+                        "first_name": row[2] if len(row) > 2 else "",
+                        "last_name": row[3] if len(row) > 3 else "",
+                        "phone_number": row[4] if len(row) > 4 else "",
+                        "status": row[5] if len(row) > 5 else "confirmed",
+                    }
+            self._cache_records = new_cache
+            self._cache_time = time.time()
         except Exception as e:
-            logger.warning(f"Error checking user row index for {telegram_user_id}: {e}")
-            return None
+            logger.warning(f"Could not refresh Google Sheets cache: {e}")
+
+    def find_user_row(self, telegram_user_id: int) -> int | None:
+        """Find 1-based row index for telegram_user_id, or None if not found."""
+        self._refresh_cache()
+        record = self._cache_records.get(telegram_user_id)
+        return record["row_index"] if record else None
+
+    def get_registration(self, telegram_user_id: int) -> Optional[Dict[str, Any]]:
+        """Get existing registration dictionary for telegram_user_id, or None if not registered."""
+        self._refresh_cache()
+        return self._cache_records.get(telegram_user_id)
 
     def is_user_registered(self, telegram_user_id: int) -> bool:
         """Check if telegram_user_id already has a row in the sheet."""
-        return self.find_user_row(telegram_user_id) is not None
+        return self.get_registration(telegram_user_id) is not None
 
     def save_registration(
         self,
@@ -153,6 +178,7 @@ class GoogleSheetsService:
                     f"User {telegram_user_id} already registered. Updating existing row {existing_row} in Google Sheets."
                 )
                 self._worksheet.update(values=[row_data], range_name=f"A{existing_row}:F{existing_row}")
+                self._refresh_cache(force=True)
                 logger.info(f"Successfully updated registration row {existing_row} for user {telegram_user_id}.")
                 return True
             else:
@@ -161,6 +187,7 @@ class GoogleSheetsService:
                     f"({first_name} {last_name}, phone: {mask_phone(phone_number)})"
                 )
                 self._worksheet.append_row(row_data)
+                self._refresh_cache(force=True)
                 logger.info(f"Successfully appended registration for user {telegram_user_id}.")
                 return True
 
