@@ -146,6 +146,25 @@ class RegistrationAgent:
         # 5. Robust offline rule-based extraction
         return self._process_with_rules(cleaned_text, session)
 
+    @staticmethod
+    def _clean_name(name: Optional[str]) -> Optional[str]:
+        """Clean and deduplicate accidentally repeated names (e.g. 'SanjarSanjar' -> 'Sanjar')."""
+        if not name:
+            return None
+        cleaned = name.strip()
+        n = len(cleaned)
+        # Handle direct concatenation repetition like 'SanjarSanjar'
+        if n >= 6 and n % 2 == 0:
+            half = n // 2
+            if cleaned[:half].lower() == cleaned[half:].lower():
+                cleaned = cleaned[:half]
+        # Handle spaced repetition like 'Sanjar Sanjar'
+        parts = cleaned.split()
+        if len(parts) == 2 and parts[0].lower() == parts[1].lower():
+            cleaned = parts[0]
+            parts = [cleaned]
+        return " ".join(p.capitalize() for p in parts) if parts else cleaned.capitalize()
+
     def _process_with_ai(
         self,
         text: str,
@@ -155,13 +174,18 @@ class RegistrationAgent:
         lang = self._detect_language(text)
 
         system_prompt = (
-            "You are a friendly, natural, and respectful conversational assistant chatting on Telegram on behalf of an event organizer in Uzbekistan.\n"
-            "Languages supported: Conversational Uzbek (primary), Russian, English.\n\n"
+            "You are a friendly, natural, and respectful conversational assistant chatting on Telegram on behalf of an event organizer in Uzbekistan.\n\n"
+            "CRITICAL LANGUAGE RULE:\n"
+            "- PRIMARY LANGUAGE IS CONVERSATIONAL UZBEK. You MUST ALWAYS write your 'reply' in Uzbek ('uz') by default.\n"
+            "- ONLY respond in Russian if the user explicitly spoke in Russian.\n"
+            "- ONLY respond in English if the user explicitly wrote an English sentence.\n"
+            "- If the user sends a single word, greeting, or name (e.g. 'Sanjar'), NEVER respond in English. Respond in warm, respectful Uzbek!\n\n"
             "CORE BEHAVIOR & TONE:\n"
             "- Speak naturally like an ordinary person having a warm, polite 1-on-1 Telegram conversation.\n"
             "- NEVER sound like an automated bot, customer-service questionnaire, or rigid form.\n"
             "- Do NOT use repetitive greetings, rigid bullet points, or multiple emojis.\n"
-            "- Keep replies concise (1-2 sentences), natural, warm, and respectful.\n\n"
+            "- Keep replies concise (1-2 sentences), natural, warm, and respectful.\n"
+            "- NEVER duplicate names (e.g. NEVER concatenate 'SanjarSanjar'). Keep names clean.\n\n"
             "CRITICAL SKILLS - ADAPT TO DYNAMIC NEW INFORMATION FROM TELEGRAM:\n"
             "1. Dynamic adaptation: If the user sends ANY new information (e.g. mentions their city, university, profession, arrival preference, or asks a question), DIRECTLY ACKNOWLEDGE AND RESPOND TO THAT NEW INFORMATION in your reply, while seamlessly steering the registration forward.\n"
             "2. Questions & FAQ: If the user asks about the event (e.g. 'Tadbir soat nechada?', 'Qayerda bo\\'ladi?', 'Bepulmi?', 'Online qatnashsa bo\\'ladimi?'), answer helpfully (e.g. 'Tadbir bepul, ertaga soat 14:00 da boshlanadi') and naturally ask for their missing registration details.\n"
@@ -210,8 +234,12 @@ class RegistrationAgent:
         if not extracted_phone:
             extracted_phone = self._extract_phone_regex(text)
 
-        first_name = data.get("first_name")
-        last_name = data.get("last_name")
+        first_name = self._clean_name(data.get("first_name"))
+        last_name = self._clean_name(data.get("last_name"))
+
+        # If first_name and last_name are identical (e.g. user typed "Sanjar Sanjar" for name)
+        if first_name and last_name and first_name.lower() == last_name.lower():
+            last_name = None
 
         # Sanity check against non-name words
         if first_name and first_name.lower().strip() in COMMON_NON_NAME_WORDS:
@@ -226,17 +254,23 @@ class RegistrationAgent:
         if not raw_intent and (has_keywords or first_name or extracted_phone):
             raw_intent = True
 
+        reply = data.get("reply")
+        if reply and first_name:
+            doubled = f"{first_name}{first_name}"
+            if doubled.lower() in reply.lower():
+                reply = re.sub(re.escape(doubled), first_name, reply, flags=re.IGNORECASE)
+
         return AgentResult(
             is_registration_intent=raw_intent,
             is_confirmation=bool(data.get("is_confirmation", False)),
             is_cancellation=bool(data.get("is_cancellation", False)),
             is_correction=bool(data.get("is_correction", False)),
             correction_target=data.get("correction_target"),
-            extracted_first_name=first_name.strip() if first_name else None,
-            extracted_last_name=last_name.strip() if last_name else None,
+            extracted_first_name=first_name,
+            extracted_last_name=last_name,
             extracted_phone_number=extracted_phone,
             detected_language=data.get("language", lang) or "uz",
-            custom_reply=data.get("reply"),
+            custom_reply=reply,
         )
 
     def _process_with_rules(
