@@ -39,16 +39,36 @@ GREETING_KEYWORDS: Set[str] = {
 # Words that must NEVER be extracted as participant names
 COMMON_NON_NAME_WORDS: Set[str] = {
     # Greetings & politeness
-    "assalomu", "assalom", "alaykum", "salom", "hayrli", "iltimos", "rahmat",
-    "здравствуйте", "привет", "спасибо", "пожалуйста", "hello", "hi", "hey", "please", "thanks",
+    "assalomu", "assalom", "alaykum", "salom", "hayrli", "iltimos", "rahmat", "tashakkur",
+    "arzimaydi", "arzimas", "xush", "kelibsiz", "korishguncha", "kurishguncha", "kutamiz",
+    "здравствуйте", "привет", "спасибо", "пожалуйста", "незачто", "не за что", "до свидания",
+    "hello", "hi", "hey", "please", "thanks", "welcome",
     # Verbs & intent words
     "ro'yxat", "royxat", "o'tish", "otish", "yozilmoqchiman", "qatnashmoqchiman",
-    "boraman", "kelaman", "ertaga", "bugun", "tadbir", "seminar", "kurs",
-    "регистрация", "записаться", "участвовать", "register", "attend", "join", "event",
+    "boraman", "kelaman", "ertaga", "bugun", "tadbir", "tadbirda", "seminar", "kurs", "vebinar",
+    "регистрация", "зарегистрироваться", "записаться", "участвовать", "приду",
+    "мероприятие", "семинар", "вебинар", "register", "attend", "join", "event",
+    # Automated bot receipts, status words, and common phrases
+    "barcha", "hamma", "qabul", "qilindi", "qiling", "qildim", "qilingan", "qilish",
+    "saqlandi", "saqlash", "saqlandim", "yangilandi", "yangilash", "muvaffaqiyatli",
+    "tug'ilgan", "tugilgan", "yilingizni", "yilingiz", "yili", "yil", "yildan",
+    "yosh", "yoshingiz", "yoshdaman", "yoshda", "yozib", "yuboring", "yuborsangiz", "yuborish",
+    "yozing", "yozildi", "masalan", "bog'lanish", "boglanish", "orqali", "uchun", "bilan",
+    "gapla", "nima", "qanaqa", "qayerda", "qachon", "soat", "bormi", "yoqmi", "joyida",
+    "boladi", "bo'ladi", "malumot", "malumotlar", "malumotlaringiz", "tayyorgarlik",
+    "все", "всех", "принято", "сохранено", "обновлено", "успешно", "год", "года",
+    "рождения", "возраст", "напишите", "отправьте", "например", "данные", "информация",
+    "all", "saved", "updated", "successful", "successfully", "birth", "year", "age",
+    "data", "info", "information",
+    # Tech words & titles
+    "backend", "frontend", "developer", "admin", "bot", "userbot", "talaba",
     # Confirmation, negation & correction words
-    "ha", "xa", "yo'q", "yoq", "emas", "xato", "noto'g'ri", "notug'ri", "kerak",
+    "ha", "xa", "yo'q", "yoq", "emas", "xato", "noto'g'ri", "notug'ri", "kerak", "kerakmas",
     "to'g'ri", "togri", "o'zgartir", "tuzat", "boshqa", "nomerim", "raqamim", "ismim", "familiyam",
-    "да", "нет", "не", "ошибка", "неправильно", "верно", "yes", "no", "wrong", "change", "correct",
+    "ism", "familiya", "telefon", "nomer", "raqam", "men", "mening", "man", "maning", "siz", "sizga",
+    "да", "нет", "не", "ошибка", "неправильно", "верно", "правильно", "номер", "имя", "фамилия",
+    "телефон", "мой", "меня", "зовут",
+    "yes", "no", "wrong", "change", "correct", "name", "surname", "phone", "number",
 }
 
 
@@ -146,9 +166,9 @@ class RegistrationAgent:
         # 5. Robust offline rule-based extraction
         return self._process_with_rules(cleaned_text, session)
 
-    @staticmethod
-    def _clean_name(name: Optional[str]) -> Optional[str]:
-        """Clean and deduplicate accidentally repeated names (e.g. 'SanjarSanjar' -> 'Sanjar')."""
+    @classmethod
+    def _clean_name(cls, name: Optional[str]) -> Optional[str]:
+        """Clean, deduplicate, and validate participant name."""
         if not name:
             return None
         cleaned = name.strip()
@@ -163,7 +183,11 @@ class RegistrationAgent:
         if len(parts) == 2 and parts[0].lower() == parts[1].lower():
             cleaned = parts[0]
             parts = [cleaned]
-        return " ".join(p.capitalize() for p in parts) if parts else cleaned.capitalize()
+        result = " ".join(p.capitalize() for p in parts) if parts else cleaned.capitalize()
+        norm = re.sub(r"[ʻ’`]", "'", result.lower().strip()).strip("'-`")
+        if norm in COMMON_NON_NAME_WORDS or len(norm) < 2:
+            return None
+        return result
 
     def _process_with_ai(
         self,
@@ -328,6 +352,11 @@ class RegistrationAgent:
                 return normalized
         return None
 
+    @staticmethod
+    def _clean_token(token: str) -> str:
+        """Strip non-alphabet characters while preserving Cyrillic, Latin, and Uzbek characters."""
+        return re.sub(r"[^a-zA-Zа-яА-ЯёЁo'g'shchO'G'SHCH\s'\-]", "", token).strip("'-`").capitalize()
+
     def _extract_names(
         self,
         text: str,
@@ -335,40 +364,52 @@ class RegistrationAgent:
     ) -> Tuple[Optional[str], Optional[str]]:
         """
         Extract valid first name and last name.
-        Strictly ignores greetings, typos, intent keywords, pronouns, and negation words.
+        Strictly ignores greetings, bot receipts, sentences, questions, and non-name words.
         """
         cleaned = text
         if known_phone:
             cleaned = cleaned.replace(known_phone, " ")
         cleaned = re.sub(r"\+?[0-9][0-9\s\-\(\)\.]{7,16}[0-9]", " ", cleaned)
-
-        # Retain letters, spaces, and Uzbek apostrophes
         cleaned = re.sub(r"[^\w\s'ʻ’`\-]", " ", cleaned)
 
+        # 1. Check explicit introductory patterns (e.g. 'ismim Jasur Aliyev', 'меня зовут...')
+        m = re.search(
+            r"(?:ismim|ism|mening ismim|меня зовут|мое имя|my name is)\s+([a-zA-Zа-яА-ЯёЁʻ’'`\-]+)(?:\s+([a-zA-Zа-яА-ЯёЁʻ’'`\-]+))?",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if m:
+            raw_f = self._clean_token(m.group(1))
+            raw_l = self._clean_token(m.group(2)) if m.group(2) else None
+            f = self._clean_name(raw_f)
+            l = self._clean_name(raw_l) if raw_l else None
+            if f and l and f.lower() == l.lower():
+                l = None
+            if f:
+                return f, l
+
+        # 2. Check total word count: if user sent a sentence (> 3 words) without explicit intro,
+        # it is a conversational sentence, question, or receipt - NEVER guess names from it.
+        raw_words = [w for w in cleaned.split() if len(w) >= 2]
+        if len(raw_words) > 3:
+            return None, None
+
+        # 3. Short message (1-3 words) - extract candidate name tokens
         valid_tokens = []
-        for raw_word in cleaned.split():
-            norm_word = re.sub(r"[ʻ’`]", "'", raw_word.lower().strip())
-            norm_word = re.sub(r"^'+|'+$", "", norm_word)
-
-            if len(norm_word) < 2 or norm_word.isdigit():
+        for raw in raw_words:
+            norm = re.sub(r"[ʻ’`]", "'", raw.lower()).strip("'-`")
+            if norm in COMMON_NON_NAME_WORDS or len(norm) < 2 or norm.isdigit():
                 continue
-            if norm_word in COMMON_NON_NAME_WORDS:
-                continue
-
-            # Check if word is a derivative of metadata words
-            if any(
-                norm_word.startswith(stem) and len(norm_word) - len(stem) <= 3
-                for stem in ["ism", "familiy", "nomer", "raqam", "telefon", "xato", "noto'g'r", "notug'r"]
-            ):
-                continue
-
-            cleaned_token = re.sub(r"[^a-zA-Zа-яА-ЯёЁo'g'shchO'G'SHCH\s'\-]", "", raw_word).strip("'-`")
-            if len(cleaned_token) >= 2:
-                valid_tokens.append(cleaned_token.capitalize())
+            token = self._clean_token(raw)
+            cleaned_token = self._clean_name(token)
+            if cleaned_token:
+                valid_tokens.append(cleaned_token)
 
         if len(valid_tokens) == 1:
             return valid_tokens[0], None
         elif len(valid_tokens) >= 2:
+            if valid_tokens[0].lower() == valid_tokens[1].lower():
+                return valid_tokens[0], None
             return valid_tokens[0], valid_tokens[1]
         return None, None
 

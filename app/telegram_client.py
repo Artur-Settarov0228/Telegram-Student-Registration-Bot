@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+import time
+from typing import Dict, List, Optional, Tuple
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 
-from app.agent import RegistrationAgent
+from app.agent import COMMON_NON_NAME_WORDS, RegistrationAgent
 from app.config import Config, mask_phone
 from app.google_sheets import GoogleSheetsService
 from app.registration import (
@@ -35,6 +36,7 @@ class UserbotService:
         self.agent = agent
         self.google_sheets = google_sheets
         self.client: Optional[TelegramClient] = None
+        self._user_msg_history: Dict[int, List[Tuple[float, str]]] = {}
 
     async def start(self) -> None:
         """Start the Telethon client and register event handlers."""
@@ -81,6 +83,42 @@ class UserbotService:
                 return
 
             sender_id = sender.id
+
+            # Anti-Bot Loop protection: Detect automated bot receipts and avoid responding
+            lowered_text = text.lower()
+            if (
+                ("saqlandi" in lowered_text and "✅" in text)
+                or "muvaffaqiyatli saqlandi" in lowered_text
+                or "muvaffaqiyatli yangilandi" in lowered_text
+                or lowered_text.startswith("qabul qilindi!")
+                or ("barcha ma'lumotlaringiz" in lowered_text and "saqlandi" in lowered_text)
+            ):
+                logger.info(
+                    f"🤖 [User {sender_id}]: Ignored automated bot receipt to prevent ping-pong loop."
+                )
+                return
+
+            # Rate limit & duplicate flood protection per user
+            now = time.time()
+            history = self._user_msg_history.setdefault(sender_id, [])
+            history[:] = [(t, msg) for t, msg in history if now - t <= 15.0]
+
+            # Check duplicate message within 10s
+            if any(msg == text and now - t <= 10.0 for t, msg in history):
+                logger.warning(
+                    f"⚠️ [User {sender_id}]: Dropping duplicate message within 10s to prevent loop."
+                )
+                return
+
+            # Check flood rate limit: max 4 messages in 10s
+            recent_count = sum(1 for t, _ in history if now - t <= 10.0)
+            if recent_count >= 4:
+                logger.warning(
+                    f"⚠️ [User {sender_id}]: Rate limit exceeded ({recent_count} msgs in 10s). Dropping to protect API quota."
+                )
+                return
+
+            history.append((now, text))
             logger.info(f"📩 [User {sender_id}]: {text}")
 
             # 2. Strict Access Control check: Exclusions and Allowlist
@@ -126,13 +164,49 @@ class UserbotService:
             # 6. Handle Confirmation when awaiting confirmation
             if session.state == RegistrationState.AWAITING_CONFIRMATION and not agent_result.is_correction:
                 if agent_result.is_confirmation or is_confirmation_intent(text):
+                    # Pre-save validation: Ensure valid names before persisting to Google Sheets
+                    f_name = (session.first_name or "").strip()
+                    l_name = (session.last_name or "").strip()
+                    f_lower = f_name.lower()
+                    l_lower = l_name.lower()
+
+                    if (
+                        not f_name
+                        or len(f_name) < 2
+                        or f_lower in COMMON_NON_NAME_WORDS
+                        or not l_name
+                        or len(l_name) < 2
+                        or l_lower in COMMON_NON_NAME_WORDS
+                        or f_lower == l_lower
+                    ):
+                        logger.warning(
+                            f"⚠️ Rejecting invalid name before Google Sheets save for user {sender_id}: "
+                            f"first_name='{f_name}', last_name='{l_name}'."
+                        )
+                        session.clear_name()
+                        session.state = RegistrationState.COLLECTING
+                        reask_msg = (
+                            "Ism va familiyangizni to'liq ajrata olmadim. "
+                            "Iltimos, ism va familiyangizni to'liq yozib yuborsangiz (masalan: Sanjar Dagarov)?"
+                            if session.language == "uz"
+                            else (
+                                "Не удалось корректно определить имя и фамилию. "
+                                "Пожалуйста, напишите имя и фамилию заново (например: Санжар Дагаров)?"
+                                if session.language == "ru"
+                                else "Could not verify your full name. Please provide your first and last name (e.g. Sanjar Dagarov)."
+                            )
+                        )
+                        await self._safe_respond(event, reask_msg)
+                        session.add_message("assistant", reask_msg)
+                        return
+
                     logger.info(
-                        f"✅ User {sender_id} confirmed registration. Saving to Google Sheets..."
+                        f"✅ User {sender_id} confirmed registration. Saving to Google Sheets by Telegram User ID..."
                     )
                     success = self.google_sheets.save_registration(
                         telegram_user_id=sender_id,
-                        first_name=session.first_name or "",
-                        last_name=session.last_name or "",
+                        first_name=f_name,
+                        last_name=l_name,
                         phone_number=session.phone_number or "",
                     )
                     if success:

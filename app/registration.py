@@ -172,8 +172,12 @@ class RegistrationSession:
             self.history = self.history[-10:]
 
     def is_complete(self) -> bool:
-        """Check if all three required fields are present."""
-        return bool(self.first_name and self.last_name and self.phone_number)
+        """Check if all three required fields are present and distinct."""
+        if not (self.first_name and self.last_name and self.phone_number):
+            return False
+        if self.first_name.strip().lower() == self.last_name.strip().lower():
+            return False
+        return True
 
     def missing_fields(self) -> List[str]:
         """Return list of missing fields."""
@@ -198,6 +202,8 @@ class RegistrationSession:
             self.first_name = first_name.strip()
         if last_name and last_name.strip():
             self.last_name = last_name.strip()
+        if self.first_name and self.last_name and self.first_name.lower() == self.last_name.lower():
+            self.last_name = None
         if phone_number and phone_number.strip():
             normalized = normalize_and_validate_phone(phone_number)
             if normalized:
