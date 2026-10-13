@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 REGISTRATION_INTENT_PHRASES: Set[str] = {
     # Uzbek
     "ro'yxat", "royxat", "tadbir", "qatnash", "yozil", "ishtirok",
-    "boraman", "kelaman", "seminar", "kurs", "vebinar", "joy",
+    "boraman", "kelaman", "seminar", "kurs", "joy",
     # Russian
     "регистрация", "зарегистрироваться", "записаться", "участвовать", "приду",
     "мероприятие", "семинар", "вебинар",
@@ -47,8 +47,8 @@ COMMON_NON_NAME_WORDS: Set[str] = {
     "ro'yxat", "royxat", "o'tish", "otish", "yozilmoqchiman", "qatnashmoqchiman",
     "boraman", "kelaman", "ertaga", "bugun", "tadbir", "tadbirda", "seminar", "kurs", "vebinar",
     "регистрация", "зарегистрироваться", "записаться", "участвовать", "приду",
-    "мероприятие", "семинар", "вебинар", "register", "attend", "join", "event",
-    # Automated bot receipts, status words, and common phrases
+    "мероприятие", "register", "attend", "join", "event",
+    # Automated receipts, status tokens & phrases
     "barcha", "hamma", "qabul", "qilindi", "qiling", "qildim", "qilingan", "qilish",
     "saqlandi", "saqlash", "saqlandim", "yangilandi", "yangilash", "muvaffaqiyatli",
     "tug'ilgan", "tugilgan", "yilingizni", "yilingiz", "yili", "yil", "yildan",
@@ -60,7 +60,7 @@ COMMON_NON_NAME_WORDS: Set[str] = {
     "рождения", "возраст", "напишите", "отправьте", "например", "данные", "информация",
     "all", "saved", "updated", "successful", "successfully", "birth", "year", "age",
     "data", "info", "information",
-    # Tech words & titles
+    # Roles & technical words
     "backend", "frontend", "developer", "admin", "bot", "userbot", "talaba",
     # Confirmation, negation & correction words
     "ha", "xa", "yo'q", "yoq", "emas", "xato", "noto'g'ri", "notug'ri", "kerak", "kerakmas",
@@ -89,7 +89,7 @@ class AgentResult:
 
 
 class RegistrationAgent:
-    """Natural conversational assistant for registration intent detection and information extraction."""
+    """Conversational assistant for registration intent detection and information extraction."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -116,12 +116,8 @@ class RegistrationAgent:
         text: str,
         session: RegistrationSession,
     ) -> AgentResult:
-        """
-        Process incoming text message in the context of the user's session history.
-        Returns AgentResult indicating intent, extracted data, and natural reply.
-        """
+        """Process incoming text message in the context of the user's session history."""
         cleaned_text = text.strip()
-        lang = self._detect_language(cleaned_text)
 
         # 1. Primary path: Use LLM with conversational context if client is configured
         if self._openai_client:
@@ -130,41 +126,13 @@ class RegistrationAgent:
             except Exception as e:
                 logger.warning(f"AI parsing failed ({e}). Falling back to deterministic rules.")
 
-        # 2. Deterministic fallback: cancellation intent
-        if is_cancellation_intent(cleaned_text):
-            return AgentResult(
-                is_registration_intent=True,
-                is_cancellation=True,
-                detected_language=lang,
-            )
-
-        # 3. Deterministic fallback: confirmation intent ONLY when awaiting confirmation
-        if session.state == RegistrationState.AWAITING_CONFIRMATION:
-            if is_confirmation_intent(cleaned_text):
-                return AgentResult(
-                    is_registration_intent=True,
-                    is_confirmation=True,
-                    detected_language=session.language,
-                )
-
-        # 4. Deterministic fallback: correction intent
-        if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):
-            is_corr, target = is_correction_intent(cleaned_text)
-            if is_corr:
-                phone = self._extract_phone_regex(cleaned_text)
-                first_name, last_name = self._extract_names(cleaned_text, known_phone=phone)
-                return AgentResult(
-                    is_registration_intent=True,
-                    is_correction=True,
-                    correction_target=target,
-                    extracted_first_name=first_name,
-                    extracted_last_name=last_name,
-                    extracted_phone_number=phone,
-                    detected_language=lang,
-                )
-
-        # 5. Robust offline rule-based extraction
+        # 2. Offline deterministic rules fallback
         return self._process_with_rules(cleaned_text, session)
+
+    @staticmethod
+    def _clean_token(token: str) -> str:
+        """Strip non-alphabet characters while preserving Cyrillic, Latin, and Uzbek characters."""
+        return re.sub(r"[^a-zA-Zа-яА-ЯёЁo'g'shchO'G'SHCH\s'\-]", "", token).strip("'-`").capitalize()
 
     @classmethod
     def _clean_name(cls, name: Optional[str]) -> Optional[str]:
@@ -242,7 +210,6 @@ class RegistrationAgent:
             "}"
         )
 
-        # Build messages list incorporating conversation history
         messages = [{"role": "system", "content": system_prompt}]
         for turn in session.history[-6:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -266,18 +233,10 @@ class RegistrationAgent:
         first_name = self._clean_name(data.get("first_name"))
         last_name = self._clean_name(data.get("last_name"))
 
-        # If first_name and last_name are identical (e.g. user typed "Sanjar Sanjar" for name)
         if first_name and last_name and first_name.lower() == last_name.lower():
             last_name = None
 
-        # Sanity check against non-name words
-        if first_name and first_name.lower().strip() in COMMON_NON_NAME_WORDS:
-            first_name = None
-        if last_name and last_name.lower().strip() in COMMON_NON_NAME_WORDS:
-            last_name = None
-
         raw_intent = bool(data.get("is_registration_intent", False))
-        # If the user asked about event, provided info, or has greetings + questions, treat as intent
         lowered = text.lower()
         has_keywords = any(kw in lowered for kw in REGISTRATION_INTENT_PHRASES)
         if not raw_intent and (has_keywords or first_name or extracted_phone):
@@ -311,40 +270,55 @@ class RegistrationAgent:
         lang = self._detect_language(text)
         lowered = text.lower()
 
-        # Check phone number
-        phone = self._extract_phone_regex(text)
+        # 1. Cancellation check
+        if is_cancellation_intent(text):
+            return AgentResult(is_registration_intent=True, is_cancellation=True, detected_language=lang)
 
-        # Extract names with strict non-name word filtering
+        # 2. Confirmation check when awaiting confirmation
+        if session.state == RegistrationState.AWAITING_CONFIRMATION and is_confirmation_intent(text):
+            return AgentResult(is_registration_intent=True, is_confirmation=True, detected_language=session.language)
+
+        # 3. Extraction of phone and names
+        phone = self._extract_phone_regex(text)
         first_name, last_name = self._extract_names(text, known_phone=phone)
 
-        # Check intent: phrases or greetings
-        has_intent_phrase = any(phrase in lowered for phrase in REGISTRATION_INTENT_PHRASES)
-        has_greeting = any(kw in lowered for kw in GREETING_KEYWORDS)
-
-        # If user is already registered in Google Sheets and IDLE, and not updating info
-        if session.is_already_registered and session.state == RegistrationState.IDLE and not (phone or (first_name and last_name)):
-            if has_greeting or has_intent_phrase or len(text.split()) <= 4:
-                name_part = f", {session.first_name}" if session.first_name else ""
-                phone_part = f" (Telefon: {session.formatted_phone()})" if session.phone_number else ""
-                reply = (
-                    f"Assalomu alaykum{name_part}! Siz tadbirimizga allaqachon muvaffaqiyatli ro'yxatdan o'tgansiz{phone_part}. "
-                    "Sizni tadbirimizda kutamiz! Biror ma'lumotni o'zgartirmoqchimisiz yoki savolingiz bormi?"
-                    if lang == "uz"
-                    else (
-                        f"Здравствуйте{name_part}! Вы уже успешно зарегистрированы на мероприятие{phone_part}. "
-                        "Ждем вас на мероприятии! Хотите обновить данные или у вас есть вопрос?"
-                        if lang == "ru"
-                        else f"Hello{name_part}! You are already registered for the event{phone_part}. Let us know if you have any questions!"
-                    )
-                )
+        # 4. Correction check
+        if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):
+            is_corr, target = is_correction_intent(text)
+            if is_corr:
                 return AgentResult(
                     is_registration_intent=True,
+                    is_correction=True,
+                    correction_target=target,
+                    extracted_first_name=first_name,
+                    extracted_last_name=last_name,
+                    extracted_phone_number=phone,
                     detected_language=lang,
-                    custom_reply=reply,
                 )
 
-        # If user is in active registration state, intent is already established
-        if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):
+        # 5. Already registered user in IDLE state
+        if session.is_already_registered and session.state == RegistrationState.IDLE and not (phone or (first_name and last_name)):
+            name_part = f", {session.first_name}" if session.first_name else ""
+            phone_part = f" (Telefon: {session.formatted_phone()})" if session.phone_number else ""
+            reply = (
+                f"Assalomu alaykum{name_part}! Siz tadbirimizga allaqachon muvaffaqiyatli ro'yxatdan o'tgansiz{phone_part}. "
+                "Sizni tadbirimizda kutamiz! Biror ma'lumotni o'zgartirmoqchimisiz yoki savolingiz bormi?"
+                if lang == "uz"
+                else (
+                    f"Здравствуйте{name_part}! Вы уже успешно зарегистрированы на мероприятие{phone_part}. "
+                    "Ждем вас на мероприятии! Хотите обновить данные или у вас есть вопрос?"
+                    if lang == "ru"
+                    else f"Hello{name_part}! You are already registered for the event{phone_part}. Let us know if you have any questions!"
+                )
+            )
+            return AgentResult(is_registration_intent=True, detected_language=lang, custom_reply=reply)
+
+        # 6. Active registration or intent phrases
+        has_intent_phrase = any(phrase in lowered for phrase in REGISTRATION_INTENT_PHRASES)
+        has_greeting = any(kw in lowered for kw in GREETING_KEYWORDS)
+        in_active_flow = session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION)
+
+        if in_active_flow or has_intent_phrase or has_greeting or (phone and (first_name or last_name)):
             return AgentResult(
                 is_registration_intent=True,
                 extracted_first_name=first_name,
@@ -353,21 +327,7 @@ class RegistrationAgent:
                 detected_language=lang,
             )
 
-        # If IDLE and user expressed attendance desire, greeting, or gave info
-        if has_intent_phrase or has_greeting or (phone and (first_name or last_name)):
-            return AgentResult(
-                is_registration_intent=True,
-                extracted_first_name=first_name,
-                extracted_last_name=last_name,
-                extracted_phone_number=phone,
-                detected_language=lang,
-            )
-
-        # Otherwise, unrelated message
-        return AgentResult(
-            is_registration_intent=False,
-            detected_language=lang,
-        )
+        return AgentResult(is_registration_intent=False, detected_language=lang)
 
     def _extract_phone_regex(self, text: str) -> Optional[str]:
         """Extract and validate phone number using regular expressions."""
@@ -378,11 +338,6 @@ class RegistrationAgent:
             if normalized:
                 return normalized
         return None
-
-    @staticmethod
-    def _clean_token(token: str) -> str:
-        """Strip non-alphabet characters while preserving Cyrillic, Latin, and Uzbek characters."""
-        return re.sub(r"[^a-zA-Zа-яА-ЯёЁo'g'shchO'G'SHCH\s'\-]", "", token).strip("'-`").capitalize()
 
     def _extract_names(
         self,
@@ -444,8 +399,6 @@ class RegistrationAgent:
         """Heuristic language detection: Uzbek, Russian, or English."""
         if re.search(r"[а-яА-ЯёЁ]", text):
             return "ru"
-        if re.search(r"(o'|g'|sh|ch|moqchiman|kerak|rahmat|qilish|emas|notug|togri|boraman|yozil|tadbir)", text, re.IGNORECASE):
-            return "uz"
         if re.search(r"\b(hello|hi|please|name|phone|event|register|confirm|wrong|fix|tomorrow)\b", text, re.IGNORECASE):
             return "en"
         return "uz"
