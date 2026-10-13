@@ -90,10 +90,9 @@ class GoogleSheetsService:
             logger.error(f"Failed to initialize Google Sheets service: {e}")
             raise
 
-    def is_user_registered(self, telegram_user_id: int) -> bool:
+    def find_user_row(self, telegram_user_id: int) -> int | None:
         """
-        Check if the telegram_user_id already has a confirmed registration.
-        Prevents duplicate entries on retries.
+        Find 1-based row index for telegram_user_id, or None if not found.
         """
         if not self._worksheet:
             self.initialize()
@@ -101,19 +100,18 @@ class GoogleSheetsService:
         assert self._worksheet is not None
         try:
             user_id_str = str(telegram_user_id)
-            # Column 2 corresponds to telegram_user_id
             user_id_col = self._worksheet.col_values(2)
-            # Skip header row (index 0)
             for idx, existing_id in enumerate(user_id_col[1:], start=2):
                 if str(existing_id).strip() == user_id_str:
-                    # Check status column (column 6)
-                    status_col = self._worksheet.cell(idx, 6).value
-                    if status_col and status_col.strip().lower() == "confirmed":
-                        return True
-            return False
+                    return idx
+            return None
         except Exception as e:
-            logger.warning(f"Error checking registration existence for user {telegram_user_id}: {e}")
-            return False
+            logger.warning(f"Error checking user row index for {telegram_user_id}: {e}")
+            return None
+
+    def is_user_registered(self, telegram_user_id: int) -> bool:
+        """Check if telegram_user_id already has a row in the sheet."""
+        return self.find_user_row(telegram_user_id) is not None
 
     def save_registration(
         self,
@@ -123,7 +121,7 @@ class GoogleSheetsService:
         phone_number: str,
     ) -> bool:
         """
-        Append a confirmed registration row.
+        Append or update a confirmed registration row in Google Sheets.
         Returns True if successful, False otherwise.
         """
         if not self._worksheet:
@@ -132,13 +130,6 @@ class GoogleSheetsService:
         assert self._worksheet is not None
 
         try:
-            # Check duplicate
-            if self.is_user_registered(telegram_user_id):
-                logger.info(
-                    f"User {telegram_user_id} is already registered. Skipping duplicate write."
-                )
-                return True
-
             # Prepare timestamp in Tashkent timezone
             try:
                 tz = ZoneInfo(self.timezone_name)
@@ -156,14 +147,22 @@ class GoogleSheetsService:
                 "confirmed",
             ]
 
-            logger.info(
-                f"Writing registration for user {telegram_user_id} "
-                f"({first_name} {last_name}, phone: {mask_phone(phone_number)})"
-            )
-
-            self._worksheet.append_row(row_data)
-            logger.info(f"Successfully saved registration for user {telegram_user_id}.")
-            return True
+            existing_row = self.find_user_row(telegram_user_id)
+            if existing_row:
+                logger.info(
+                    f"User {telegram_user_id} already registered. Updating existing row {existing_row} in Google Sheets."
+                )
+                self._worksheet.update(values=[row_data], range_name=f"A{existing_row}:F{existing_row}")
+                logger.info(f"Successfully updated registration row {existing_row} for user {telegram_user_id}.")
+                return True
+            else:
+                logger.info(
+                    f"Writing new registration for user {telegram_user_id} "
+                    f"({first_name} {last_name}, phone: {mask_phone(phone_number)})"
+                )
+                self._worksheet.append_row(row_data)
+                logger.info(f"Successfully appended registration for user {telegram_user_id}.")
+                return True
 
         except Exception as e:
             logger.error(

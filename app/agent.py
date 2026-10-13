@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Set, Tuple
 
-from app.config import Config, mask_phone
+from app.config import Config
 from app.registration import (
     RegistrationSession,
     RegistrationState,
@@ -20,53 +20,35 @@ from app.registration import (
 
 logger = logging.getLogger(__name__)
 
-# Registration keywords for intent detection in Uzbek, Russian, English
-REGISTRATION_KEYWORDS: Set[str] = {
+# Registration and attendance intent triggers
+REGISTRATION_INTENT_PHRASES: Set[str] = {
     # Uzbek
-    "ro'yxat", "royxat", "ro'yxatdan", "royxatdan", "tadbir", "tadbirga",
-    "qatnash", "qatnashmoqchiman", "qatnashmoqchi", "yozil", "yozilmoqchiman",
-    "yozilmoqchi", "ishtirok", "ishtirokchi", "seminar", "konferensiya",
-    "vebinar", "kurs", "qabul",
+    "ro'yxat", "royxat", "tadbir", "qatnash", "yozil", "ishtirok",
+    "boraman", "kelaman", "seminar", "kurs", "vebinar", "joy",
     # Russian
-    "регистрация", "зарегистрироваться", "записаться", "участвовать",
-    "мероприятие", "семинар", "вебинар", "конференция",
+    "регистрация", "зарегистрироваться", "записаться", "участвовать", "приду",
+    "мероприятие", "семинар", "вебинар",
     # English
     "register", "registration", "attend", "participate", "join", "event",
-    "webinar", "seminar", "conference",
 }
 
-# Words that must NEVER be treated as participant names
+GREETING_KEYWORDS: Set[str] = {
+    "assalomu", "assalom", "alaykum", "salom", "здравствуйте", "привет", "hello", "hi", "hey",
+}
+
+# Words that must NEVER be extracted as participant names
 COMMON_NON_NAME_WORDS: Set[str] = {
-    # Uzbek greetings & variants
-    "assalomu", "assalomy", "assalom", "assalamu", "alaykum", "aleykum", "alekum",
-    "va", "valaykum", "salom", "salomlar", "hayrli", "tong", "kun", "oqshom", "kech",
-    # Uzbek registration verbs & intent words
-    "ro'yxat", "royxat", "ro'yxatdan", "royxatdan", "o'tish", "otish", "o'tmoqchiman",
-    "otmoqchiman", "o'tmoqchi", "otmoqchi", "yozilmoqchiman", "yozilmoqchi", "yozilish",
-    "qatnashmoqchiman", "qatnashmoqchi", "qatnashish", "ishtirok", "etmoqchiman", "etish",
-    "tadbir", "tadbirga", "seminar", "seminarga", "konferensiya", "vebinar", "kurs", "kursga",
-    "bormoqchiman", "bormoqchi", "kelmoqchiman", "qabul",
-    # Uzbek corrections, negations & feedback words
-    "noto'g'ri", "notug'ri", "notugri", "noto'gri", "xato", "xatolik", "yo'q", "yoq", "emas",
-    "kerak", "to'g'rilash", "to'girlash", "togirlash", "to'g'ri", "togri", "o'zgartirish",
-    "ozgartirish", "o'zgartir", "almashtirish", "almashtir", "tuzatish", "tuzat", "boshqattan",
-    "boshidan", "qayta", "yana", "qara", "bu", "shuni", "huddi", "odamday", "javob", "berish",
-    # Uzbek pronouns & metadata nouns
-    "ism", "ismim", "ismi", "ismni", "familiya", "familiyam", "familiyasi", "familiyani",
-    "nomer", "nomerim", "nomerini", "raqam", "raqamim", "raqamini", "telefon", "telefonim",
-    "telefonni", "men", "mening", "man", "maning", "menga", "manga", "iltimos", "rahmat",
-    "ha", "xa", "ok", "mayli", "shunday",
-    # Russian stopwords
-    "привет", "здравствуйте", "здрасте", "добрый", "день", "утро", "вечер",
-    "регистрация", "зарегистрироваться", "записаться", "участвовать", "хочу", "мероприятие",
-    "семинар", "вебинар", "конференция", "неправильно", "ошибка", "исправить", "поменять",
-    "изменить", "заново", "нет", "не", "имя", "фамилия", "номер", "телефон", "меня", "зовут",
-    "пожалуйста", "спасибо", "да", "верно", "правильно",
-    # English stopwords
-    "hello", "hi", "hey", "good", "morning", "afternoon", "evening",
-    "register", "registration", "attend", "join", "event", "webinar", "seminar", "conference",
-    "wrong", "incorrect", "error", "fix", "change", "edit", "reset", "no", "not", "name",
-    "phone", "please", "thank", "thanks", "yes", "confirm", "ok", "sure",
+    # Greetings & politeness
+    "assalomu", "assalom", "alaykum", "salom", "hayrli", "iltimos", "rahmat",
+    "здравствуйте", "привет", "спасибо", "пожалуйста", "hello", "hi", "hey", "please", "thanks",
+    # Verbs & intent words
+    "ro'yxat", "royxat", "o'tish", "otish", "yozilmoqchiman", "qatnashmoqchiman",
+    "boraman", "kelaman", "ertaga", "bugun", "tadbir", "seminar", "kurs",
+    "регистрация", "записаться", "участвовать", "register", "attend", "join", "event",
+    # Confirmation, negation & correction words
+    "ha", "xa", "yo'q", "yoq", "emas", "xato", "noto'g'ri", "notug'ri", "kerak",
+    "to'g'ri", "togri", "o'zgartir", "tuzat", "boshqa", "nomerim", "raqamim", "ismim", "familiyam",
+    "да", "нет", "не", "ошибка", "неправильно", "верно", "yes", "no", "wrong", "change", "correct",
 }
 
 
@@ -87,7 +69,7 @@ class AgentResult:
 
 
 class RegistrationAgent:
-    """Natural language agent for registration intent detection and information extraction."""
+    """Natural conversational assistant for registration intent detection and information extraction."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -106,7 +88,7 @@ class RegistrationAgent:
                 )
             except Exception as e:
                 logger.warning(
-                    f"Could not initialize OpenAI client ({e}). Falling back to rule-based engine."
+                    f"Could not initialize OpenAI client ({e}). Falling back to conversational engine."
                 )
 
     def process_message(
@@ -115,13 +97,20 @@ class RegistrationAgent:
         session: RegistrationSession,
     ) -> AgentResult:
         """
-        Process incoming text message in the context of the user's session.
-        Returns AgentResult indicating intent, extracted data, and suggested reply.
+        Process incoming text message in the context of the user's session history.
+        Returns AgentResult indicating intent, extracted data, and natural reply.
         """
         cleaned_text = text.strip()
         lang = self._detect_language(cleaned_text)
 
-        # 1. Deterministic check: cancellation intent
+        # 1. Primary path: Use LLM with conversational context if client is configured
+        if self._openai_client:
+            try:
+                return self._process_with_ai(cleaned_text, session)
+            except Exception as e:
+                logger.warning(f"AI parsing failed ({e}). Falling back to deterministic rules.")
+
+        # 2. Deterministic fallback: cancellation intent
         if is_cancellation_intent(cleaned_text):
             return AgentResult(
                 is_registration_intent=True,
@@ -129,7 +118,7 @@ class RegistrationAgent:
                 detected_language=lang,
             )
 
-        # 2. Deterministic check: confirmation intent when awaiting confirmation
+        # 3. Deterministic fallback: confirmation intent ONLY when awaiting confirmation
         if session.state == RegistrationState.AWAITING_CONFIRMATION:
             if is_confirmation_intent(cleaned_text):
                 return AgentResult(
@@ -138,7 +127,7 @@ class RegistrationAgent:
                     detected_language=session.language,
                 )
 
-        # 3. Deterministic check: correction intent when active
+        # 4. Deterministic fallback: correction intent
         if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):
             is_corr, target = is_correction_intent(cleaned_text)
             if is_corr:
@@ -154,14 +143,7 @@ class RegistrationAgent:
                     detected_language=lang,
                 )
 
-        # 4. If OpenAI client is available, use LLM for natural language understanding
-        if self._openai_client:
-            try:
-                return self._process_with_ai(cleaned_text, session)
-            except Exception as e:
-                logger.warning(f"AI parsing failed ({e}). Using rule-based fallback.")
-
-        # 5. Fallback: robust rule-based natural language parser
+        # 5. Robust offline rule-based extraction
         return self._process_with_rules(cleaned_text, session)
 
     def _process_with_ai(
@@ -169,58 +151,55 @@ class RegistrationAgent:
         text: str,
         session: RegistrationSession,
     ) -> AgentResult:
-        """Process message using OpenAI chat completions."""
+        """Process message using OpenAI/Gemini chat completions with full conversation context."""
         lang = self._detect_language(text)
 
         system_prompt = (
-            "You are an intelligent, polite personal assistant managing event registrations on Telegram.\n"
-            "Languages supported: Uzbek (primary), Russian, English.\n"
-            "Event registration requires exactly: first_name, last_name, and phone_number.\n\n"
-            "Instructions:\n"
-            "1. 'is_registration_intent': true if the user wants to register, attend an event, or is continuing registration. FALSE if message is unrelated chit-chat, spam, or casual greeting with no registration desire.\n"
-            "2. 'is_correction': true if the user states that previous details are wrong or needs to edit (e.g. 'notug\\'ri ismni to\\'girlash kerak', 'ismim xato', 'неправильно', 'wrong name').\n"
-            "3. 'correction_target': 'name', 'phone', or 'all' if user is correcting.\n"
-            "4. 'first_name': REAL participant first name only. NEVER treat greetings ('Assalomu', 'Salom'), words like 'Notug\\'ri', or intent words as names!\n"
-            "5. 'last_name': REAL participant last name only. NEVER treat 'Alaykum', 'Ismni', etc. as names!\n"
-            "6. 'phone_number': Participant's phone number if clearly stated, or null.\n"
-            "7. 'is_confirmation': true if user clearly confirms details (e.g. 'Ha', 'Tasdiqlayman', 'Да', 'Yes').\n"
-            "8. 'is_cancellation': true if user wants to cancel ('/cancel', 'Bekor qilish').\n"
-            "9. 'reply': A friendly, human response in the detected language.\n"
-            "   - If user just greeted and asked to register (e.g. 'assalomu alaykum ro\\'yxat'): 'Assalomu alaykum! Tadbirga ro\\'yxatdan o\\'tish uchun ismingiz, familiyangiz va telefon raqamingiz kerak bo\\'ladi.'\n"
-            "   - If user asked to fix name: 'Kechirasiz! Iltimos, to\\'g\\'ri ism va familiyangizni yuboring (masalan: Ali Valiyev).'\n\n"
-            "Respond ONLY in valid JSON format:\n"
+            "You are a friendly, natural, and respectful conversational assistant chatting on Telegram on behalf of an event organizer in Uzbekistan.\n"
+            "Languages supported: Conversational Uzbek (primary), Russian, English.\n\n"
+            "CORE BEHAVIOR & TONE:\n"
+            "- Speak naturally like an ordinary person having a warm, polite 1-on-1 Telegram conversation.\n"
+            "- NEVER sound like an automated bot, customer-service questionnaire, or rigid form.\n"
+            "- Do NOT use repetitive greetings, rigid bullet points, or multiple emojis.\n"
+            "- Keep replies concise (1-2 sentences), natural, warm, and respectful.\n\n"
+            "CRITICAL SKILLS - ADAPT TO DYNAMIC NEW INFORMATION FROM TELEGRAM:\n"
+            "1. Dynamic adaptation: If the user sends ANY new information (e.g. mentions their city, university, profession, arrival preference, or asks a question), DIRECTLY ACKNOWLEDGE AND RESPOND TO THAT NEW INFORMATION in your reply, while seamlessly steering the registration forward.\n"
+            "2. Questions & FAQ: If the user asks about the event (e.g. 'Tadbir soat nechada?', 'Qayerda bo\\'ladi?', 'Bepulmi?', 'Online qatnashsa bo\\'ladimi?'), answer helpfully (e.g. 'Tadbir bepul, ertaga soat 14:00 da boshlanadi') and naturally ask for their missing registration details.\n"
+            "3. Corrections: If the user corrects or changes previously stated details ('Ismimni xato yozding', 'Yo\\'q, familiyam...', 'Raqamim boshqa: +998...'), acknowledge the correction warmly ('Tushundim, yangilab qo\\'ydim') and update the corresponding fields.\n"
+            "4. Partial info: If user gives only first name, ask naturally for surname and phone. If only phone, ask for full name.\n"
+            "5. Confirmation: When all 3 fields (first_name, last_name, phone_number) are present and state is AWAITING_CONFIRMATION, if the user confirms ('Ha', 'To\\'g\\'ri', 'Tasdiqlayman'), set is_confirmation: true. Do NOT confirm if they are asking a question or correcting something.\n"
+            "6. Cancellation: If user clearly wants to cancel ('Bekor qil', 'To\\'xtat', 'Kerak emas'), set is_cancellation: true.\n"
+            "7. Registration Intent: Set is_registration_intent to true if the user's message is related to attending, registering, asking questions about the event (time, place, format, cost), or providing any information. Set false ONLY if it is completely irrelevant personal banter.\n"
+            "- NEVER invent or hallucinate personal details.\n\n"
+            "Current registration status for this user:\n"
+            f"Already collected: first_name={session.first_name!r}, last_name={session.last_name!r}, phone_number={session.phone_number!r}.\n"
+            f"Current state: {session.state.value}.\n\n"
+            "Output JSON format:\n"
             "{\n"
             '  "is_registration_intent": boolean,\n'
+            '  "is_confirmation": boolean,\n'
+            '  "is_cancellation": boolean,\n'
             '  "is_correction": boolean,\n'
             '  "correction_target": "name" | "phone" | "all" | null,\n'
             '  "first_name": string | null,\n'
             '  "last_name": string | null,\n'
             '  "phone_number": string | null,\n'
-            '  "is_confirmation": boolean,\n'
-            '  "is_cancellation": boolean,\n'
             '  "language": "uz" | "ru" | "en",\n'
-            '  "reply": string | null\n'
+            '  "reply": string\n'
             "}"
         )
 
-        user_context = {
-            "current_state": session.state.value,
-            "already_collected": {
-                "first_name": session.first_name,
-                "last_name": session.last_name,
-                "phone_number": session.phone_number,
-            },
-            "user_message": text,
-        }
+        # Build messages list incorporating conversation history
+        messages = [{"role": "system", "content": system_prompt}]
+        for turn in session.history[-6:]:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": text})
 
         assert self._openai_client is not None
         response = self._openai_client.chat.completions.create(
             model=self.config.openai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_context, ensure_ascii=False)},
-            ],
-            temperature=0.1,
+            messages=messages,
+            temperature=0.3,
             response_format={"type": "json_object"},
         )
 
@@ -234,14 +213,21 @@ class RegistrationAgent:
         first_name = data.get("first_name")
         last_name = data.get("last_name")
 
-        # Sanity check: discard if extracted name is in stop words
+        # Sanity check against non-name words
         if first_name and first_name.lower().strip() in COMMON_NON_NAME_WORDS:
             first_name = None
         if last_name and last_name.lower().strip() in COMMON_NON_NAME_WORDS:
             last_name = None
 
+        raw_intent = bool(data.get("is_registration_intent", False))
+        # If the user asked about event, provided info, or has greetings + questions, treat as intent
+        lowered = text.lower()
+        has_keywords = any(kw in lowered for kw in REGISTRATION_INTENT_PHRASES)
+        if not raw_intent and (has_keywords or first_name or extracted_phone):
+            raw_intent = True
+
         return AgentResult(
-            is_registration_intent=bool(data.get("is_registration_intent", False)),
+            is_registration_intent=raw_intent,
             is_confirmation=bool(data.get("is_confirmation", False)),
             is_cancellation=bool(data.get("is_cancellation", False)),
             is_correction=bool(data.get("is_correction", False)),
@@ -258,17 +244,21 @@ class RegistrationAgent:
         text: str,
         session: RegistrationSession,
     ) -> AgentResult:
-        """Deterministic rule-based intent and entity extraction."""
+        """Conversational natural language parser for offline / rule-based fallback."""
         lang = self._detect_language(text)
         lowered = text.lower()
 
         # Check phone number
         phone = self._extract_phone_regex(text)
 
-        # Extract names with strict stopword filtering
+        # Extract names with strict non-name word filtering
         first_name, last_name = self._extract_names(text, known_phone=phone)
 
-        # If user is in active registration state (COLLECTING or AWAITING_CONFIRMATION)
+        # Check intent: phrases or greetings
+        has_intent_phrase = any(phrase in lowered for phrase in REGISTRATION_INTENT_PHRASES)
+        has_greeting = any(kw in lowered for kw in GREETING_KEYWORDS)
+
+        # If user is in active registration state, intent is already established
         if session.state in (RegistrationState.COLLECTING, RegistrationState.AWAITING_CONFIRMATION):
             return AgentResult(
                 is_registration_intent=True,
@@ -278,16 +268,8 @@ class RegistrationAgent:
                 detected_language=lang,
             )
 
-        # If session is IDLE, check for greetings, registration keywords, or name/phone
-        GREETING_KEYWORDS = {
-            "assalomu", "assalomy", "assalom", "assalamu", "alaykum", "alykum",
-            "alekum", "aleykum", "salom", "salomlar", "здравствуйте", "привет", "hello", "hi"
-        }
-        has_greeting = any(kw in lowered for kw in GREETING_KEYWORDS)
-        has_reg_keyword = any(kw in lowered for kw in REGISTRATION_KEYWORDS)
-
-        # If user sent greeting or registration intent or provided details
-        if has_reg_keyword or has_greeting or (phone and (first_name or last_name)):
+        # If IDLE and user expressed attendance desire, greeting, or gave info
+        if has_intent_phrase or has_greeting or (phone and (first_name or last_name)):
             return AgentResult(
                 is_registration_intent=True,
                 extracted_first_name=first_name,
@@ -339,7 +321,7 @@ class RegistrationAgent:
             if norm_word in COMMON_NON_NAME_WORDS:
                 continue
 
-            # Check if word is a derivative of meta words (e.g. ismimni, familiyasini, nomeriga)
+            # Check if word is a derivative of metadata words
             if any(
                 norm_word.startswith(stem) and len(norm_word) - len(stem) <= 3
                 for stem in ["ism", "familiy", "nomer", "raqam", "telefon", "xato", "noto'g'r", "notug'r"]
@@ -360,8 +342,8 @@ class RegistrationAgent:
         """Heuristic language detection: Uzbek, Russian, or English."""
         if re.search(r"[а-яА-ЯёЁ]", text):
             return "ru"
-        if re.search(r"(o'|g'|sh|ch|moqchiman|kerak|rahmat|qilish|emas|notug|togri|qara)", text, re.IGNORECASE):
+        if re.search(r"(o'|g'|sh|ch|moqchiman|kerak|rahmat|qilish|emas|notug|togri|boraman|yozil|tadbir)", text, re.IGNORECASE):
             return "uz"
-        if re.search(r"\b(hello|hi|please|name|phone|event|register|confirm|wrong|fix)\b", text, re.IGNORECASE):
+        if re.search(r"\b(hello|hi|please|name|phone|event|register|confirm|wrong|fix|tomorrow)\b", text, re.IGNORECASE):
             return "en"
         return "uz"

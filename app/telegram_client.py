@@ -14,7 +14,6 @@ from app.google_sheets import GoogleSheetsService
 from app.registration import (
     ConversationManager,
     RegistrationState,
-    is_cancellation_intent,
     is_confirmation_intent,
 )
 
@@ -82,39 +81,53 @@ class UserbotService:
                 return
 
             sender_id = sender.id
+            logger.info(f"📩 [User {sender_id}]: {text}")
 
             # 2. Strict Access Control check: Exclusions and Allowlist
             if not self.config.access_controller.is_allowed(sender_id):
-                logger.debug(
-                    f"User {sender_id} is excluded or not in allowlist. Ignoring silently."
+                logger.info(
+                    f"⛔ User {sender_id} is excluded or not in allowlist. Ignoring silently."
                 )
                 return
 
-            # 3. Retrieve conversation session
+            # 3. Retrieve conversation session and record user message
             session = self.conversation_manager.get_session(sender_id)
+            session.add_message("user", text)
 
-            # 4. Check Cancellation intent across all states
-            if is_cancellation_intent(text):
+            # 4. Pass to Registration Agent for natural-language analysis
+            agent_result = self.agent.process_message(text, session)
+            logger.info(
+                f"🧠 [Agent {sender_id}]: intent={agent_result.is_registration_intent}, "
+                f"confirm={agent_result.is_confirmation}, corr={agent_result.is_correction}"
+            )
+
+            # 5. Handle Cancellation
+            if agent_result.is_cancellation:
                 if session.state != RegistrationState.IDLE:
-                    logger.info(f"User {sender_id} cancelled registration.")
+                    logger.info(f"🛑 User {sender_id} cancelled registration.")
                     session.reset()
                     cancel_msg = (
-                        "Ro'yxatdan o'tish bekor qilindi."
-                        if session.language == "uz"
-                        else (
-                            "Регистрация отменена."
-                            if session.language == "ru"
-                            else "Registration has been cancelled."
+                        agent_result.custom_reply
+                        or (
+                            "Tushundim, ro'yxatdan o'tish to'xtatildi. Agar fikringiz o'zgarsa yoki yana yozilishni istasangiz, bemalol murojaat qilishingiz mumkin."
+                            if session.language == "uz"
+                            else (
+                                "Понял, регистрация отменена. Если передумаете, пишите в любое время."
+                                if session.language == "ru"
+                                else "Registration cancelled. Let me know if you need anything else."
+                            )
                         )
                     )
                     await self._safe_respond(event, cancel_msg)
+                    session.add_message("assistant", cancel_msg)
+                    logger.info(f"📤 [Bot -> {sender_id}]: {cancel_msg}")
                 return
 
-            # 5. Check Confirmation when awaiting confirmation
-            if session.state == RegistrationState.AWAITING_CONFIRMATION:
-                if is_confirmation_intent(text):
+            # 6. Handle Confirmation when awaiting confirmation
+            if session.state == RegistrationState.AWAITING_CONFIRMATION and not agent_result.is_correction:
+                if agent_result.is_confirmation or is_confirmation_intent(text):
                     logger.info(
-                        f"User {sender_id} confirmed registration. Saving to Google Sheets..."
+                        f"✅ User {sender_id} confirmed registration. Saving to Google Sheets..."
                     )
                     success = self.google_sheets.save_registration(
                         telegram_user_id=sender_id,
@@ -125,41 +138,44 @@ class UserbotService:
                     if success:
                         session.state = RegistrationState.CONFIRMED
                         success_msg = (
-                            "Tabriklaymiz! Siz tadbirga muvaffaqiyatli ro'yxatdan o'tdingiz. Rahmat!"
-                            if session.language == "uz"
-                            else (
-                                "Поздравляем! Вы успешно зарегистрировались на мероприятие. Спасибо!"
-                                if session.language == "ru"
-                                else "Congratulations! You have successfully registered for the event. Thank you!"
+                            agent_result.custom_reply
+                            or (
+                                "🎉 **Tabriklayman, muvaffaqiyatli ro'yxatdan o'tdingiz!**\n\n"
+                                "Sizni tadbirimizda mamnuniyat bilan kutamiz. Agar qo'shimcha savollaringiz bo'lsa, bemalol so'rashingiz mumkin."
+                                if session.language == "uz"
+                                else (
+                                    "🎉 **Поздравляем, вы успешно зарегистрированы!**\n\n"
+                                    "С нетерпением ждем вас на мероприятии. Если возникнут вопросы, обращайтесь в любое время."
+                                    if session.language == "ru"
+                                    else "🎉 **Congratulations, your registration is confirmed!**\n\nWe look forward to seeing you at the event. Feel free to reach out if you have any questions."
+                                )
                             )
                         )
                         await self._safe_respond(event, success_msg)
-                        # Reset session after confirmed completion
+                        session.add_message("assistant", success_msg)
+                        logger.info(f"📤 [Bot -> {sender_id}]: {success_msg}")
                         session.reset()
                     else:
                         error_msg = (
-                            "Kechirasiz, ma'lumotlarni saqlashda texnik xatolik yuz berdi. "
-                            "Iltimos, birozdan so'ng qayta urinib ko'ring yoki tasdiqlash uchun 'Ha' deb yozing."
+                            "Ma'lumotlarni saqlashda texnik xatolik yuz berdi. "
+                            "Iltimos, birozdan so'ng qayta tasdiqlab ko'ring."
                             if session.language == "uz"
                             else (
-                                "Извините, произошла техническая ошибка при сохранении данных. "
-                                "Пожалуйста, попробуйте позже или напишите 'Да' для подтверждения."
+                                "Произошла техническая ошибка при сохранении данных. "
+                                "Пожалуйста, попробуйте подтвердить чуть позже."
                                 if session.language == "ru"
-                                else "Sorry, a technical error occurred while saving your registration. "
-                                "Please try again shortly or reply 'Yes' to retry."
+                                else "A technical error occurred while saving. Please try confirming again shortly."
                             )
                         )
                         await self._safe_respond(event, error_msg)
+                        session.add_message("assistant", error_msg)
+                        logger.info(f"📤 [Bot -> {sender_id}]: {error_msg}")
                     return
 
-            # 6. Pass to Registration Agent for natural-language analysis
-            agent_result = self.agent.process_message(text, session)
-
-            # If user wants to correct previously entered info (e.g. "notug'ri ismni to'girlash kerak")
+            # 7. Handle Correction target clearing
             if agent_result.is_correction:
                 target = agent_result.correction_target
                 logger.info(f"User {sender_id} requested correction for target: {target}")
-
                 if target == "phone":
                     session.clear_phone()
                 elif target == "name":
@@ -168,44 +184,21 @@ class UserbotService:
                     session.clear_name()
                     session.clear_phone()
 
-                # If user provided replacement data in the same message
-                if (
-                    agent_result.extracted_first_name
-                    or agent_result.extracted_last_name
-                    or agent_result.extracted_phone_number
-                ):
-                    session.update_fields(
-                        first_name=agent_result.extracted_first_name,
-                        last_name=agent_result.extracted_last_name,
-                        phone_number=agent_result.extracted_phone_number,
-                        language=agent_result.detected_language,
-                    )
-
-                if session.is_complete():
-                    session.state = RegistrationState.AWAITING_CONFIRMATION
-                    summary_msg = session.get_summary_message()
-                    await self._safe_respond(event, summary_msg)
-                else:
-                    session.state = RegistrationState.COLLECTING
-                    prompt = session.get_correction_prompt(target)
-                    await self._safe_respond(event, prompt)
-                return
-
-            # If user is idle and no registration intent is detected, silently ignore
+            # 8. If user is idle and message has no intent or custom reply, ignore
             if (
                 session.state == RegistrationState.IDLE
                 and not agent_result.is_registration_intent
+                and not agent_result.custom_reply
             ):
                 logger.debug(
                     f"Message from {sender_id} does not indicate registration intent. Ignoring."
                 )
                 return
 
-            # If registration intent detected from IDLE state, move to COLLECTING
+            # 9. Move from IDLE to COLLECTING and update collected entities
             if session.state == RegistrationState.IDLE:
                 session.state = RegistrationState.COLLECTING
 
-            # Update session fields with any extracted information
             session.update_fields(
                 first_name=agent_result.extracted_first_name,
                 last_name=agent_result.extracted_last_name,
@@ -213,16 +206,20 @@ class UserbotService:
                 language=agent_result.detected_language,
             )
 
-            # 7. Check if all required information is collected
+            # 10. Respond according to registration state
             if session.is_complete():
                 session.state = RegistrationState.AWAITING_CONFIRMATION
-                summary_msg = session.get_summary_message()
-                await self._safe_respond(event, summary_msg)
+                reply = agent_result.custom_reply or session.get_summary_message()
             else:
                 session.state = RegistrationState.COLLECTING
-                # Use custom reply if provided, or generated missing fields prompt
-                reply = agent_result.custom_reply or session.get_missing_prompt()
-                await self._safe_respond(event, reply)
+                if agent_result.is_correction:
+                    reply = agent_result.custom_reply or session.get_correction_prompt(agent_result.correction_target)
+                else:
+                    reply = agent_result.custom_reply or session.get_missing_prompt()
+
+            await self._safe_respond(event, reply)
+            session.add_message("assistant", reply)
+            logger.info(f"📤 [Bot -> {sender_id}]: {reply}")
 
         except FloodWaitError as e:
             logger.warning(

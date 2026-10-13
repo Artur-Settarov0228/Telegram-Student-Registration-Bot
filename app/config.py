@@ -59,22 +59,6 @@ class AccessController:
             return False
         return True
 
-    def add_excluded(self, user_id: int) -> None:
-        """Dynamically add a user ID to the exclusion list."""
-        self.excluded_ids.add(user_id)
-
-    def remove_excluded(self, user_id: int) -> None:
-        """Dynamically remove a user ID from the exclusion list."""
-        self.excluded_ids.discard(user_id)
-
-    def add_allowed(self, user_id: int) -> None:
-        """Dynamically add a user ID to the allowlist."""
-        self.allowed_ids.add(user_id)
-
-    def remove_allowed(self, user_id: int) -> None:
-        """Dynamically remove a user ID from the allowlist."""
-        self.allowed_ids.discard(user_id)
-
 
 @dataclass
 class Config:

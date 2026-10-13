@@ -19,7 +19,7 @@ class RegistrationState(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-# Common Uzbek, Russian, English confirmation and cancellation keywords
+# Common confirmation keywords and phrases
 CONFIRMATION_KEYWORDS = {
     # Uzbek
     "ha", "xa", "tasdiqlayman", "to'g'ri", "togri", "albatta", "mayli", "shunday",
@@ -33,11 +33,22 @@ CANCELLATION_KEYWORDS = {
     # Command
     "/cancel",
     # Uzbek
-    "bekor", "bekor qilish", "bekor qil", "yo'q", "yoq", "kerakmas", "to'xtat", "to'xtatish",
+    "bekor", "bekor qilish", "bekor qil", "kerakmas", "kerak emas", "to'xtat", "to'xtatish", "qatnashmayman", "bormayman",
     # Russian
-    "отмена", "отменить", "нет", "не надо", "стоп",
+    "отмена", "отменить", "не надо", "стоп", "не буду",
     # English
-    "cancel", "no", "stop", "abort",
+    "cancel", "stop", "abort",
+}
+
+CORRECTION_KEYWORDS = {
+    # Uzbek
+    "noto'g'ri", "notug'ri", "notugri", "noto'gri", "xato", "xatolik",
+    "to'g'rilash", "to'girlash", "togirlash", "o'zgartirish", "ozgartirish",
+    "almashtirish", "almashtir", "tuzatish", "tuzat", "boshqattan", "boshidan",
+    # Russian
+    "неправильно", "ошибка", "исправить", "поменять", "изменить", "заново",
+    # English
+    "wrong", "incorrect", "error", "fix", "change", "edit", "reset",
 }
 
 
@@ -51,7 +62,6 @@ def normalize_and_validate_phone(phone_raw: str | None) -> str | None:
     if not phone_raw:
         return None
 
-    # Remove formatting characters: spaces, dashes, parentheses, dots
     cleaned = re.sub(r"[\s\-\(\)\.]", "", phone_raw.strip())
     if not cleaned:
         return None
@@ -78,10 +88,30 @@ def normalize_and_validate_phone(phone_raw: str | None) -> str | None:
 def is_confirmation_intent(text: str) -> bool:
     """Check if message represents a clear confirmation."""
     cleaned = re.sub(r"[^\w\s/']", "", text.lower().strip())
+
+    # If message contains negation, hesitation or correction indicators, it is NOT confirmation
+    negation_or_correction = [
+        "lekin", "ammo", "boshqa", "noto'g'ri", "notug'ri", "xato", "emas",
+        "o'zgartir", "tuzat", "но", "неправильно", "ошибка", "другой", "but", "wrong", "change"
+    ]
+    if any(neg in cleaned for neg in negation_or_correction):
+        return False
+    
+    # Check natural multi-word confirmations
+    confirmation_phrases = [
+        "ha shu to'g'ri", "ha shu togri", "shu to'g'ri", "shu togri",
+        "ha to'g'ri", "ha togri", "ha shunday", "to'g'ri", "togri",
+        "tasdiqlayman", "albatta", "да верно", "все верно", "подтверждаю",
+        "yes confirm", "that's correct", "thats correct"
+    ]
+    if any(phrase in cleaned for phrase in confirmation_phrases):
+        return True
+
     if cleaned in CONFIRMATION_KEYWORDS:
         return True
+
     words = cleaned.split()
-    return any(w in CONFIRMATION_KEYWORDS for w in words if len(w) > 1)
+    return any(w in CONFIRMATION_KEYWORDS for w in words if len(w) > 1 or w in {"ha", "xa", "да"})
 
 
 def is_cancellation_intent(text: str) -> bool:
@@ -93,18 +123,6 @@ def is_cancellation_intent(text: str) -> bool:
     return any(w in CANCELLATION_KEYWORDS for w in words)
 
 
-CORRECTION_KEYWORDS = {
-    # Uzbek
-    "noto'g'ri", "notug'ri", "notugri", "noto'gri", "xato", "xatolik",
-    "to'g'rilash", "to'girlash", "togirlash", "o'zgartirish", "ozgartirish",
-    "almashtirish", "almashtir", "tuzatish", "tuzat", "boshqattan", "boshidan",
-    # Russian
-    "неправильно", "ошибка", "исправить", "поменять", "изменить", "заново",
-    # English
-    "wrong", "incorrect", "error", "fix", "change", "edit", "reset",
-}
-
-
 def is_correction_intent(text: str) -> tuple[bool, Optional[str]]:
     """
     Check if the user is asking to correct or edit previously entered info.
@@ -112,8 +130,14 @@ def is_correction_intent(text: str) -> tuple[bool, Optional[str]]:
     """
     cleaned = text.lower().strip()
     words = set(re.findall(r"[\w']+", cleaned))
-    
-    is_correcting = any(kw in words or kw in cleaned for kw in CORRECTION_KEYWORDS)
+
+    # Detect correction intent from phrases or keywords
+    phrases = [
+        "ismimni xato yozding", "ism xato", "ismim xato", "boshqa raqam",
+        "boshqa nomer", "boshqa ism", "xato yozding", "noto'g'ri", "notug'ri",
+        "неправильно", "ошибка", "другой номер", "wrong name", "wrong number"
+    ]
+    is_correcting = any(p in cleaned for p in phrases) or any(kw in words for kw in CORRECTION_KEYWORDS)
     if not is_correcting:
         return False, None
 
@@ -130,7 +154,7 @@ def is_correction_intent(text: str) -> tuple[bool, Optional[str]]:
 
 @dataclass
 class RegistrationSession:
-    """Isolated registration state for a single user."""
+    """Isolated registration state and conversation history for a single user."""
 
     user_id: int
     first_name: Optional[str] = None
@@ -139,6 +163,13 @@ class RegistrationSession:
     state: RegistrationState = RegistrationState.IDLE
     language: str = "uz"
     updated_at: datetime = field(default_factory=datetime.utcnow)
+    history: List[Dict[str, str]] = field(default_factory=list)
+
+    def add_message(self, role: str, content: str) -> None:
+        """Record turn in history, retaining recent conversation context."""
+        self.history.append({"role": role, "content": content})
+        if len(self.history) > 10:
+            self.history = self.history[-10:]
 
     def is_complete(self) -> bool:
         """Check if all three required fields are present."""
@@ -175,79 +206,6 @@ class RegistrationSession:
             self.language = language.strip().lower()
         self.updated_at = datetime.utcnow()
 
-    def get_summary_message(self) -> str:
-        """Generate confirmation message with collected participant details."""
-        if self.language == "ru":
-            return (
-                "Ваши данные для регистрации:\n\n"
-                f"• Имя: {self.first_name}\n"
-                f"• Фамилия: {self.last_name}\n"
-                f"• Телефон: {self.phone_number}\n\n"
-                "Все верно? Для подтверждения напишите 'Да'.\n"
-                "Для отмены напишите /cancel."
-            )
-        elif self.language == "en":
-            return (
-                "Registration details:\n\n"
-                f"• First name: {self.first_name}\n"
-                f"• Last name: {self.last_name}\n"
-                f"• Phone: {self.phone_number}\n\n"
-                "Is this correct? Reply 'Yes' to confirm.\n"
-                "To cancel, reply /cancel."
-            )
-        else:
-            return (
-                "Ro'yxatdan o'tish ma'lumotlaringiz:\n\n"
-                f"• Ism: {self.first_name}\n"
-                f"• Familiya: {self.last_name}\n"
-                f"• Telefon: {self.phone_number}\n\n"
-                "Barchasi to'g'rimi? Tasdiqlash uchun 'Ha' deb yozing.\n"
-                "Bekor qilish uchun /cancel deb yozing."
-            )
-
-    def get_missing_prompt(self) -> str:
-        """Generate professional prompt for missing fields."""
-        missing = self.missing_fields()
-        
-        if self.language == "ru":
-            if "first_name" in missing and "last_name" in missing and "phone_number" in missing:
-                return "Здравствуйте! Для регистрации на мероприятие отправьте ваше имя, фамилию и номер телефона."
-            if "first_name" in missing and "last_name" in missing:
-                return "Пожалуйста, отправьте ваше имя и фамилию."
-            if "first_name" in missing:
-                return "Пожалуйста, укажите ваше имя."
-            if "last_name" in missing:
-                return "Пожалуйста, укажите вашу фамилию."
-            if "phone_number" in missing:
-                return "Пожалуйста, отправьте ваш номер телефона (например: +998901234567)."
-            return "Пожалуйста, отправьте недостающие данные."
-
-        elif self.language == "en":
-            if "first_name" in missing and "last_name" in missing and "phone_number" in missing:
-                return "Hello! To register for the event, please provide your first name, surname, and phone number."
-            if "first_name" in missing and "last_name" in missing:
-                return "Please provide your first name and surname."
-            if "first_name" in missing:
-                return "Please provide your first name."
-            if "last_name" in missing:
-                return "Please provide your surname."
-            if "phone_number" in missing:
-                return "Please provide your phone number (e.g. +998901234567)."
-            return "Please provide the missing details."
-
-        else:  # Default Uzbek
-            if "first_name" in missing and "last_name" in missing and "phone_number" in missing:
-                return "Assalomu alaykum! Tadbirga ro'yxatdan o'tish uchun ismingiz, familiyangiz va telefon raqamingizni yuboring."
-            if "first_name" in missing and "last_name" in missing:
-                return "Iltimos, ismingiz va familiyangizni yuboring."
-            if "first_name" in missing:
-                return "Iltimos, ismingizni yuboring."
-            if "last_name" in missing:
-                return "Iltimos, familiyangizni yuboring."
-            if "phone_number" in missing:
-                return "Iltimos, telefon raqamingizni yuboring (masalan: +998901234567)."
-            return "Iltimos, yetishmayotgan ma'lumotlarni yuboring."
-
     def clear_name(self) -> None:
         """Clear first and last name for correction."""
         self.first_name = None
@@ -259,29 +217,99 @@ class RegistrationSession:
         self.phone_number = None
         self.updated_at = datetime.utcnow()
 
+    def formatted_phone(self) -> str:
+        """Format phone number for clean aesthetic display (e.g. +998 90 123 45 67)."""
+        if not self.phone_number:
+            return ""
+        p = self.phone_number
+        if p.startswith("+998") and len(p) == 13:
+            return f"+998 {p[4:6]} {p[6:9]} {p[9:11]} {p[11:13]}"
+        return p
+
+    def get_summary_message(self) -> str:
+        """Aesthetic confirmation prompt formatted cleanly with Markdown."""
+        phone = self.formatted_phone()
+        if self.language == "ru":
+            return (
+                "Отлично, ваши данные подготовлены:\n\n"
+                f"👤 **Имя и фамилия:** {self.first_name} {self.last_name}\n"
+                f"📞 **Номер телефона:** {phone}\n\n"
+                "Все данные верны? Подтверждаете регистрацию?"
+            )
+        elif self.language == "en":
+            return (
+                "Great, here are your registration details:\n\n"
+                f"👤 **Name:** {self.first_name} {self.last_name}\n"
+                f"📞 **Phone number:** {phone}\n\n"
+                "Is all information correct? Please confirm."
+            )
+        else:
+            return (
+                "Ajoyib, ma'lumotlaringizni tayyorladim:\n\n"
+                f"👤 **Ism-familiya:** {self.first_name} {self.last_name}\n"
+                f"📞 **Telefon raqam:** {phone}\n\n"
+                "Barcha ma'lumotlar to'g'rimi, tasdiqlaysizmi?"
+            )
+
+    def get_missing_prompt(self) -> str:
+        """Conversational, natural prompt asking for missing details."""
+        missing = self.missing_fields()
+        
+        if self.language == "ru":
+            if len(missing) == 3:
+                return "Здравствуйте! Чтобы записаться на мероприятие, напишите ваше имя, фамилию и номер телефона."
+            if "first_name" in missing and "last_name" in missing:
+                return "Понял. Напишите, пожалуйста, ваше имя и фамилию."
+            if "phone_number" in missing:
+                name_ref = f"{self.first_name}, " if self.first_name else ""
+                return f"{name_ref}номер телефона тоже отправьте, пожалуйста."
+            if "last_name" in missing:
+                return f"{self.first_name}, фамилию тоже напишите, пожалуйста."
+            return "Не хватает некоторых данных, отправьте их, пожалуйста."
+
+        elif self.language == "en":
+            if len(missing) == 3:
+                return "Hello! To register for the event, please share your first name, surname, and phone number."
+            if "phone_number" in missing:
+                name_ref = f"{self.first_name}, " if self.first_name else ""
+                return f"{name_ref}could you also send your phone number?"
+            return "Please provide the missing details."
+
+        else:  # Default Uzbek
+            if len(missing) == 3:
+                return "Assalomu alaykum! Tadbirga ro'yxatdan o'tishingiz uchun ism-familiyangiz va telefon raqamingizni yozib yubora olasizmi?"
+            if "first_name" in missing and "last_name" in missing:
+                return "Tushundim. Sizni ro'yxatga kiritib qo'yishimiz uchun ism va familiyangizni ham yozib yuborsangiz?"
+            if "phone_number" in missing:
+                name_ref = f"{self.first_name}, " if self.first_name else ""
+                return f"{name_ref}siz bilan bog'lanishimiz uchun telefon raqamingizni ham yozib yubora olasizmi?"
+            if "last_name" in missing:
+                return f"{self.first_name}, familiyangizni ham yozib yuborsangiz?"
+            return "Ro'yxatdan o'tishni yakunlash uchun yetishmayotgan ma'lumotlarni ham yozib yuborsangiz?"
+
     def get_correction_prompt(self, target: Optional[str] = None) -> str:
-        """Get concise, professional prompt when user requests a correction."""
+        """Conversational acknowledgement when user requests a correction."""
         if self.language == "ru":
             if target == "phone":
-                return "Пожалуйста, отправьте правильный номер телефона (например: +998901234567)."
+                return "Понял, исправим номер. Отправьте правильный номер телефона."
             elif target == "name":
-                return "Пожалуйста, отправьте правильное имя и фамилию (например: Али Валиев)."
+                return "Понял, исправим имя. Напишите правильное имя и фамилию."
             else:
-                return "Пожалуйста, отправьте правильные данные."
+                return "Хорошо, исправим. Напишите правильные данные."
         elif self.language == "en":
             if target == "phone":
-                return "Please send your correct phone number (e.g. +998901234567)."
+                return "Got it, let's update your number. Please send the correct phone number."
             elif target == "name":
-                return "Please send your correct first name and surname (e.g. Ali Valiyev)."
+                return "Understood, let's fix your name. Please send your correct name and surname."
             else:
-                return "Please send your correct details."
+                return "Sure, let's update that. Please send the correct info."
         else:
             if target == "phone":
-                return "Iltimos, to'g'ri telefon raqamingizni yuboring (masalan: +998901234567)."
+                return "Tushundim, telefon raqamingizni yangilaymiz. To'g'ri raqamingizni yozib yuboring."
             elif target == "name":
-                return "Iltimos, to'g'ri ism va familiyangizni yuboring (masalan: Ali Valiyev)."
+                return "Tushunarli, ismingizni to'g'rilaymiz. Iltimos, to'g'ri ism-familiyangizni yozib yuborsangiz?"
             else:
-                return "Iltimos, to'g'ri ma'lumotlarni yuboring."
+                return "Mayli, ma'lumotlaringizni to'g'rilab qo'yamiz. To'g'ri ma'lumotlarni yozib yuboring."
 
     def reset(self) -> None:
         """Reset session to idle state."""
@@ -291,6 +319,7 @@ class RegistrationSession:
         self.state = RegistrationState.IDLE
         self.language = "uz"
         self.updated_at = datetime.utcnow()
+        # Keep recent history for context continuity
 
 
 class ConversationManager:
